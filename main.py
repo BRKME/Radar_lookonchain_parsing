@@ -1,20 +1,18 @@
 import os
 import sys
 import time
-import tweepy
 import requests
+import feedparser
 from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-TWITTER_BEARER_TOKEN = os.getenv('TWITTER_BEARER_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 required_vars = {
-    'TWITTER_BEARER_TOKEN': TWITTER_BEARER_TOKEN,
     'OPENAI_API_KEY': OPENAI_API_KEY,
     'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
     'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
@@ -25,8 +23,9 @@ for var_name, var_value in required_vars.items():
         print(f"ERROR: {var_name} not set")
         sys.exit(1)
 
-client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+RSS_FEED_URL = "https://nitter.poast.org/lookonchain/rss"
 
 def get_last_tweet_id():
     try:
@@ -42,49 +41,33 @@ def save_last_tweet_id(tweet_id):
 
 def get_lookonchain_tweets(since_id=None):
     try:
-        # Alternative: use your own timeline with mentions/likes from lookonchain
-        # This doesn't require elevated access
-        response = client.search_recent_tweets(
-            query='from:lookonchain',
-            max_results=20,
-            tweet_fields=['created_at', 'attachments', 'referenced_tweets'],
-            media_fields=['url', 'preview_image_url'],
-            expansions=['attachments.media_keys'],
-            since_id=since_id
-        )
+        response = requests.get(RSS_FEED_URL, timeout=30)
+        feed = feedparser.parse(response.content)
         
         tweets_data = []
-        if response.data:
-            media_dict = {}
-            if response.includes and 'media' in response.includes:
-                for media in response.includes['media']:
-                    media_dict[media.media_key] = media
+        for entry in feed.entries[:20]:
+            tweet_id = entry.link.split('/')[-1].split('#')[0]
             
-            for tweet in response.data:
-                if hasattr(tweet, 'referenced_tweets'):
-                    continue
-                
-                tweet_info = {
-                    'id': tweet.id,
-                    'text': tweet.text,
-                    'media_urls': []
-                }
-                
-                if hasattr(tweet, 'attachments') and 'media_keys' in tweet.attachments:
-                    for media_key in tweet.attachments['media_keys']:
-                        if media_key in media_dict:
-                            media = media_dict[media_key]
-                            if hasattr(media, 'url'):
-                                tweet_info['media_urls'].append(media.url)
-                
-                tweets_data.append(tweet_info)
+            if since_id and tweet_id <= since_id:
+                continue
+            
+            tweet_info = {
+                'id': tweet_id,
+                'text': entry.title,
+                'link': entry.link,
+                'media_urls': []
+            }
+            
+            if hasattr(entry, 'media_content'):
+                for media in entry.media_content:
+                    if 'url' in media:
+                        tweet_info['media_urls'].append(media['url'])
+            
+            tweets_data.append(tweet_info)
         
         return tweets_data
-    except tweepy.errors.TweepyException as e:
-        print(f"Twitter API error: {e}")
-        return []
     except Exception as e:
-        print(f"Unexpected error fetching tweets: {e}")
+        print(f"RSS feed error: {e}")
         return []
 
 def process_with_ai(text):
