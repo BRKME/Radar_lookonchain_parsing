@@ -13,21 +13,15 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Debug - List files
-        run: |
-          echo "Current directory:"
-          pwd
-          echo "Files in root:"
-          ls -la
-          echo "Python version:"
-          python --version
-      
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
       
       - name: Run bot
         env:
@@ -40,6 +34,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_tweet_id.txt
-          git diff --staged --quiet || git commit -m "Update last tweet ID" || true
+          git add last_content.txt
+          git diff --staged --quiet || git commit -m "Update last content hash" || true
           git push || true
