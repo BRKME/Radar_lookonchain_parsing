@@ -80,7 +80,7 @@ def normalize_facts_for_hash(facts):
     return json.dumps(normalized, sort_keys=True)
 
 def validate_facts(facts):
-    """Validate that facts dict contains minimum required data"""
+    """Validate that facts dict contains minimum required data and is recent"""
     if not isinstance(facts, dict):
         return False
     
@@ -95,6 +95,17 @@ def validate_facts(facts):
     crypto = facts.get('crypto', '')
     if crypto.lower() in ['unknown', 'n/a', '', 'none']:
         return False
+    
+    # Check timestamp - filter out old tweets
+    timestamp = facts.get('timestamp', '').lower()
+    if timestamp:
+        # Skip if timestamp contains dates (old tweets)
+        old_indicators = ['2024', '2023', '2022', 'oct', 'nov', 'dec', 'jan', 'feb', 
+                         'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep',
+                         'd ago', 'days ago', 'day ago', 'week', 'month', 'year']
+        if any(indicator in timestamp for indicator in old_indicators):
+            print(f"⏭️  Skipping old tweet: timestamp={timestamp}")
+            return False
     
     return True
 
@@ -179,13 +190,15 @@ def extract_tweets_from_screenshot(image_path):
                             "type": "text",
                             "text": """Extract KEY FACTUAL DATA ONLY from visible tweets (not full text).
 
-For each tweet, extract ONLY:
+CRITICAL: Extract ONLY tweets from the last 24 hours. Skip old tweets!
+
+For each RECENT tweet, extract ONLY:
 1. Cryptocurrency/token mentioned
 2. Numerical amounts (BTC, USD, etc)
 3. Wallet addresses (if visible)
 4. Exchange names (Binance, Coinbase, etc)
 5. Action type (bought, sold, transferred)
-6. Timestamp
+6. Timestamp (MUST be recent - hours/minutes ago, NOT days/months)
 
 Format as JSON array:
 [
@@ -195,15 +208,19 @@ Format as JSON array:
     "usd_value": "$40M",
     "action": "transferred",
     "exchange": "Binance",
-    "timestamp": "2h ago"
+    "timestamp": "2h ago"  // MUST be hours/minutes, NOT days!
   }
 ]
 
-IMPORTANT:
+CRITICAL RULES:
 - Extract FACTS only, NOT opinions or analysis
 - Do NOT copy tweet text verbatim
-- Extract 3-5 latest tweets only
-- Skip retweets and replies"""
+- Extract ONLY tweets posted in last 24 hours
+- Skip tweets with timestamps like "Oct 30, 2024" or "14m ago" if date is old
+- ONLY include if timestamp shows hours (like "2h ago", "45m ago")
+- Extract 3-5 latest RECENT tweets only
+- Skip retweets and replies
+- If NO recent tweets found, return empty array []"""
                         },
                         {
                             "type": "image_url",
@@ -247,7 +264,7 @@ def process_with_ai(facts_data):
                 messages=[
                     {
                         "role": "system", 
-                        "content": """You are a professional crypto market analyst. 
+                        "content": """You are a professional crypto market analyst focusing on RECENT market activity.
 
 Your task: Create ORIGINAL analysis from provided factual data.
 
@@ -258,12 +275,14 @@ CRITICAL RULES:
 4. Include risk assessment if relevant
 5. Keep analysis concise (2-3 sentences)
 6. Write as if you discovered this data yourself
+7. Focus on RECENT activity (hours/minutes, NOT old news)
+8. If data seems old, note it as "historical reference"
 
-Style: Professional, analytical, informative"""
+Style: Professional, analytical, informative, TIMELY"""
                     },
                     {
                         "role": "user", 
-                        "content": f"""Based on these blockchain transaction facts, write original analysis:
+                        "content": f"""Based on these RECENT blockchain transaction facts, write original analysis:
 
 {facts_str}
 
@@ -271,6 +290,7 @@ Provide:
 - What happened (in your words)
 - Market implications
 - Context if relevant
+- Emphasize RECENCY if data is fresh (hours ago)
 
 Keep it under 200 words."""
                     }
@@ -362,7 +382,8 @@ async def main_async():
         for facts in facts_list[:3]:
             # Validate facts first
             if not validate_facts(facts):
-                print(f"Skipping invalid facts: {facts}")
+                timestamp = facts.get('timestamp', 'no timestamp')
+                print(f"Skipping invalid/old facts: {facts.get('crypto', 'unknown')} (timestamp: {timestamp})")
                 continue
             
             # Create deterministic hash
