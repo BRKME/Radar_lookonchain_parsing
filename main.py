@@ -26,10 +26,13 @@ for var_name, var_value in required_vars.items():
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 NITTER_INSTANCES = [
+    "https://nitter.poast.org/lookonchain/rss",
     "https://nitter.privacydev.net/lookonchain/rss",
     "https://nitter.net/lookonchain/rss",
-    "https://nitter.1d4.us/lookonchain/rss",
-    "https://nitter.unixfox.eu/lookonchain/rss",
+    "https://nitter.it/lookonchain/rss",
+    "https://nitter.woodland.cafe/lookonchain/rss",
+    "https://bird.habedieeh.re/lookonchain/rss",
+    "https://nitter.d420.de/lookonchain/rss",
 ]
 
 def get_last_tweet_id():
