@@ -8,6 +8,7 @@ import random
 import asyncio
 from collections import deque
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 from openai import OpenAI
 import requests
 from dotenv import load_dotenv
@@ -140,6 +141,10 @@ async def capture_twitter_screenshot():
             """)
             
             page = await context.new_page()
+            
+            # Apply stealth mode to bypass bot detection
+            await stealth_async(page)
+            print("✅ Stealth mode enabled")
             
             url = f'https://twitter.com/{TWITTER_USERNAME}'
             print(f"Loading {url} with UA: {user_agent[:50]}...")
