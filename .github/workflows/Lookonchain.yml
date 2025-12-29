@@ -1,13 +1,15 @@
-name: Lookonchain Bot
+name: Lookonchain Telegram Bot
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */2 * * *'  # Каждые 2 часа
   workflow_dispatch:
 
 jobs:
   fetch:
-    runs-on: ubuntu-22.04  # Use 22.04 for Playwright compatibility
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15  # Prevent hanging
+    
     steps:
       - uses: actions/checkout@v3
         with:
@@ -17,30 +19,59 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Setup Playwright
+      - name: Verify session file exists
         run: |
-          playwright install --with-deps chromium
+          if [ ! -f "lookonchain_session.session" ]; then
+            echo "❌ ERROR: Session file not found!"
+            echo "Please run setup_session.py locally first"
+            exit 1
+          fi
+          echo "✅ Session file found"
       
       - name: Run bot
         env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
         run: python main.py
       
-      - name: Commit state
+      - name: Commit state files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Create last_content.txt if it doesn't exist
-          touch last_content.txt
+          # Create files if they don't exist
+          touch last_message_id.txt
+          touch processed_hashes.txt
           
-          git add last_content.txt
-          git diff --staged --quiet || git commit -m "Update last content hash" || true
-          git push || true
+          # Add state files
+          git add last_message_id.txt
+          git add processed_hashes.txt
+          
+          # Add session files if modified
+          if [ -f "lookonchain_session.session" ]; then
+            git add lookonchain_session.session
+            echo "✅ Session file added"
+          fi
+          
+          if [ -f "lookonchain_session.session-journal" ]; then
+            git add lookonchain_session.session-journal
+            echo "✅ Session journal added"
+          fi
+          
+          # Commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No state changes to commit"
+          else
+            git commit -m "Update bot state [skip ci]" || true
+            git push || true
+            echo "✅ State committed"
+          fi
