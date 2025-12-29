@@ -1,35 +1,49 @@
 import os
 import sys
 import time
-import base64
-import json
-import hashlib
-import random
 import asyncio
-from collections import deque
-from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+import hashlib
+import logging
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 from openai import OpenAI
 import requests
 from dotenv import load_dotenv
 
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
+# Telegram API для чтения Lookonchain
+TELEGRAM_API_ID = os.getenv('TELEGRAM_API_ID')
+TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH')
+
+# OpenAI для анализа
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+# Telegram Bot для публикации
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TARGET_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-TWITTER_USERNAME = 'lookonchain'
+ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID', TARGET_CHAT_ID)  # For error notifications
 
-# Anti-detection: User-Agent rotation
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15'
-]
+# Источник данных
+LOOKONCHAIN_CHANNEL = 'lookonchainchannel'  # @lookonchainchannel
 
+# Configuration
+MAX_INPUT_LENGTH = 2000  # Truncate long messages
+MAX_MESSAGES_PER_RUN = 10
+OPENAI_TIMEOUT = 15
+POST_DELAY = 3  # Seconds between posts
+
+# Проверка переменных
 required_vars = {
+    'TELEGRAM_API_ID': TELEGRAM_API_ID,
+    'TELEGRAM_API_HASH': TELEGRAM_API_HASH,
     'OPENAI_API_KEY': OPENAI_API_KEY,
     'TELEGRAM_BOT_TOKEN': BOT_TOKEN,
     'TELEGRAM_CHAT_ID': TARGET_CHAT_ID
@@ -37,408 +51,316 @@ required_vars = {
 
 for var_name, var_value in required_vars.items():
     if not var_value:
-        print(f"ERROR: {var_name} not set")
+        logger.error(f"{var_name} not set")
         sys.exit(1)
+
+# Конвертировать API_ID в int
+try:
+    TELEGRAM_API_ID = int(TELEGRAM_API_ID)
+except ValueError:
+    logger.error("TELEGRAM_API_ID must be a number")
+    sys.exit(1)
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-def get_last_processed_hashes():
-    """Get deque of recently processed content hashes (ordered, max 10)"""
+def get_last_processed_id():
+    """Получить ID последнего обработанного сообщения"""
     try:
-        with open('last_content.txt', 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-            if not content:
-                return deque(maxlen=10)
-            # Load hashes in order, keep max 10
-            hashes = [line.strip() for line in content.split('\n') if line.strip()]
-            return deque(hashes, maxlen=10)
-    except FileNotFoundError:
-        return deque(maxlen=10)
+        with open('last_message_id.txt', 'r') as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return 0
 
-def save_last_processed_hashes(hash_deque):
-    """Save deque of processed hashes (automatically keeps last 10)"""
-    with open('last_content.txt', 'w', encoding='utf-8') as f:
-        # deque already maintains max 10, write in order
-        f.write('\n'.join(hash_deque))
+def save_last_processed_id(message_id):
+    """Сохранить ID последнего обработанного сообщения"""
+    with open('last_message_id.txt', 'w') as f:
+        f.write(str(message_id))
+    logger.info(f"Saved last processed ID: {message_id}")
+
+def get_processed_hashes():
+    """Получить хэши обработанных сообщений (для дедупликации)"""
+    try:
+        with open('processed_hashes.txt', 'r') as f:
+            return set(line.strip() for line in f if line.strip())
+    except FileNotFoundError:
+        return set()
+
+def save_processed_hash(content_hash):
+    """Сохранить хэш обработанного сообщения"""
+    with open('processed_hashes.txt', 'a') as f:
+        f.write(f"{content_hash}\n")
 
 def get_content_hash(text):
-    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+    """Создать хэш контента для дедупликации"""
+    # Normalize: lowercase, remove extra spaces
+    normalized = ' '.join(text.lower().split())
+    return hashlib.md5(normalized.encode()).hexdigest()
 
-def normalize_facts_for_hash(facts):
-    """Normalize facts dict for deterministic hashing"""
-    if not isinstance(facts, dict):
-        return json.dumps(facts, sort_keys=True)
+def is_ad_or_spam(text):
+    """Проверить является ли сообщение рекламой"""
+    ad_keywords = [
+        'sponsored', 'advertisement', 'promo code', 'affiliate',
+        'discount code', 'use code', 'click here', 'limited offer',
+        'join our', 'subscribe to', 'sign up now'
+    ]
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in ad_keywords)
+
+def process_with_ai(text):
+    """Обработать текст через OpenAI с улучшенной защитой copyright"""
+    # Truncate if too long
+    if len(text) > MAX_INPUT_LENGTH:
+        text = text[:MAX_INPUT_LENGTH] + "..."
+        logger.warning(f"Message truncated to {MAX_INPUT_LENGTH} chars")
     
-    # Recursively sort all nested dicts
-    def sort_dict(d):
-        if isinstance(d, dict):
-            return {k: sort_dict(v) for k, v in sorted(d.items())}
-        elif isinstance(d, list):
-            return [sort_dict(i) for i in d]
-        return d
-    
-    normalized = sort_dict(facts)
-    return json.dumps(normalized, sort_keys=True)
-
-def validate_facts(facts):
-    """Validate that facts dict contains minimum required data and is recent"""
-    if not isinstance(facts, dict):
-        return False
-    
-    # Must have at least one meaningful field
-    required_fields = ['crypto', 'amount', 'action', 'exchange']
-    has_data = any(facts.get(field) for field in required_fields)
-    
-    if not has_data:
-        return False
-    
-    # Check for empty or placeholder values
-    crypto = facts.get('crypto', '')
-    if crypto.lower() in ['unknown', 'n/a', '', 'none']:
-        return False
-    
-    # Check timestamp - filter out old tweets
-    timestamp = facts.get('timestamp', '').lower()
-    if timestamp:
-        # Skip if timestamp contains dates (old tweets)
-        old_indicators = ['2024', '2023', '2022', 'oct', 'nov', 'dec', 'jan', 'feb', 
-                         'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep',
-                         'd ago', 'days ago', 'day ago', 'week', 'month', 'year']
-        if any(indicator in timestamp for indicator in old_indicators):
-            print(f"⏭️  Skipping old tweet: timestamp={timestamp}")
-            return False
-    
-    return True
-
-async def capture_twitter_screenshot():
-    browser = None
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-dev-shm-usage',
-                    '--no-sandbox'
-                ]
-            )
-            
-            # Random User-Agent
-            user_agent = random.choice(USER_AGENTS)
-            
-            context = await browser.new_context(
-                viewport={'width': 1280, 'height': 1920},
-                user_agent=user_agent,
-                locale='en-US',
-                timezone_id='America/New_York'
-            )
-            
-            # Disable automation detection
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-            """)
-            
-            page = await context.new_page()
-            
-            # Apply stealth mode to bypass bot detection
-            await stealth_async(page)
-            print("✅ Stealth mode enabled")
-            
-            url = f'https://twitter.com/{TWITTER_USERNAME}'
-            print(f"Loading {url} with UA: {user_agent[:50]}...")
-            
-            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
-            
-            # Random wait time (human-like behavior)
-            wait_time = random.randint(5000, 10000)
-            print(f"Waiting {wait_time}ms for content load...")
-            await page.wait_for_timeout(wait_time)
-            
-            # Check for login wall
-            page_text = await page.text_content('body')
-            if 'Sign in' in page_text or 'Log in' in page_text:
-                print("WARNING: Twitter showing login page - trying anyway")
-            
-            screenshot_path = 'twitter_screenshot.png'
-            await page.screenshot(path=screenshot_path, full_page=False)
-            print(f"Screenshot saved: {screenshot_path}")
-            
-            return screenshot_path
-            
-    except Exception as e:
-        print(f"Error capturing screenshot: {e}")
-        return None
-    finally:
-        if browser:
-            await browser.close()
-
-def extract_tweets_from_screenshot(image_path):
-    try:
-        with open(image_path, 'rb') as img_file:
-            image_data = base64.b64encode(img_file.read()).decode('utf-8')
-        
-        if len(image_data) > 20_000_000:
-            print("WARNING: Image too large for Vision API")
-            return []
-        
-        print("Analyzing screenshot with GPT-4o-mini vision...")
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": """Extract KEY FACTUAL DATA ONLY from visible tweets (not full text).
-
-CRITICAL: Extract ONLY tweets from the last 24 hours. Skip old tweets!
-
-For each RECENT tweet, extract ONLY:
-1. Cryptocurrency/token mentioned
-2. Numerical amounts (BTC, USD, etc)
-3. Wallet addresses (if visible)
-4. Exchange names (Binance, Coinbase, etc)
-5. Action type (bought, sold, transferred)
-6. Timestamp (MUST be recent - hours/minutes ago, NOT days/months)
-
-Format as JSON array:
-[
-  {
-    "crypto": "BTC",
-    "amount": "1000 BTC",
-    "usd_value": "$40M",
-    "action": "transferred",
-    "exchange": "Binance",
-    "timestamp": "2h ago"  // MUST be hours/minutes, NOT days!
-  }
-]
-
-CRITICAL RULES:
-- Extract FACTS only, NOT opinions or analysis
-- Do NOT copy tweet text verbatim
-- Extract ONLY tweets posted in last 24 hours
-- Skip tweets with timestamps like "Oct 30, 2024" or "14m ago" if date is old
-- ONLY include if timestamp shows hours (like "2h ago", "45m ago")
-- Extract 3-5 latest RECENT tweets only
-- Skip retweets and replies
-- If NO recent tweets found, return empty array []"""
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{image_data}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=2000,  # Increased for long wallet addresses
-            timeout=60
-        )
-        
-        result = response.choices[0].message.content
-        print(f"Vision API response: {result[:200]}...")
-        
-        result_clean = result.replace('```json', '').replace('```', '').strip()
-        
-        try:
-            facts = json.loads(result_clean)
-            return facts if isinstance(facts, list) else []
-        except json.JSONDecodeError as je:
-            print(f"JSON decode error: {je}")
-            print(f"Raw response: {result_clean[:500]}")
-            return []
-        
-    except Exception as e:
-        print(f"Error extracting facts: {e}")
-        return []
-
-def process_with_ai(facts_data):
-    """Transform factual data into original analysis"""
     for attempt in range(3):
         try:
-            # Convert facts to readable format
-            facts_str = json.dumps(facts_data, indent=2)
-            
             response = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
-                        "role": "system", 
-                        "content": """You are a professional crypto market analyst focusing on RECENT market activity.
+                        "role": "system",
+                        "content": """Ты криптоаналитик. Создай ПОЛНОСТЬЮ ОРИГИНАЛЬНЫЙ анализ.
 
-Your task: Create ORIGINAL analysis from provided factual data.
+КРИТИЧЕСКИЕ ПРАВИЛА (НАРУШЕНИЕ = "SKIP"):
+1. НИКОГДА не используй более 5 слов подряд из исходного текста
+2. Полностью ПЕРЕПИШИ всю информацию своими словами
+3. Анализ должен быть на 80%+ отличен от оригинала
+4. Сохрани только: точные цифры, тикеры криптовалют, суммы в USD
+5. ВСЁ ОСТАЛЬНОЕ - твои собственные формулировки и выводы
 
-CRITICAL RULES:
-1. NEVER copy or quote source text
-2. Write in YOUR OWN analytical voice
-3. Add market context and implications
-4. Include risk assessment if relevant
-5. Keep analysis concise (2-3 sentences)
-6. Write as if you discovered this data yourself
-7. Focus on RECENT activity (hours/minutes, NOT old news)
-8. If data seems old, note it as "historical reference"
+Формат:
+- 2-3 предложения МАКСИМУМ
+- Краткий, информативный, аналитический
+- Без лишних слов
 
-Style: Professional, analytical, informative, TIMELY"""
+Если не можешь создать достаточно оригинальный текст - ответь ТОЛЬКО слово "SKIP"."""
                     },
                     {
-                        "role": "user", 
-                        "content": f"""Based on these RECENT blockchain transaction facts, write original analysis:
-
-{facts_str}
-
-Provide:
-- What happened (in your words)
-- Market implications
-- Context if relevant
-- Emphasize RECENCY if data is fresh (hours ago)
-
-Keep it under 200 words."""
+                        "role": "user",
+                        "content": f"Новость: {text}\n\nТвой анализ:"
                     }
                 ],
-                max_tokens=400,
-                timeout=30,
-                temperature=0.8  # Higher creativity for more transformation
+                max_tokens=300,
+                temperature=0.7,
+                timeout=OPENAI_TIMEOUT
             )
-            return response.choices[0].message.content
+            
+            result = response.choices[0].message.content.strip()
+            
+            # Проверка на SKIP
+            if result == "SKIP" or len(result) < 20:
+                logger.warning("AI refused to create original content or result too short")
+                return None
+            
+            return result
             
         except Exception as e:
-            print(f"OpenAI error (attempt {attempt+1}/3): {e}")
+            logger.error(f"OpenAI error (attempt {attempt+1}/3): {e}")
             if attempt < 2:
-                time.sleep(2)
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s
+            else:
+                return None
     
-    # Fallback: create basic summary from facts
-    try:
-        if isinstance(facts_data, dict):
-            crypto = facts_data.get('crypto', 'Unknown')
-            amount = facts_data.get('amount', '')
-            action = facts_data.get('action', '')
-            
-            if crypto and amount and action:
-                return f"Market activity detected: {amount} {crypto} {action}."
-            elif crypto:
-                return f"{crypto} blockchain activity detected."
-        
-        return "Crypto market update detected."
-    except Exception as e:
-        print(f"Fallback error: {e}")
-        return "Blockchain activity update."
+    return None
 
-def send_to_telegram(text):
+def send_to_telegram(text, is_error=False):
+    """Отправить в Telegram через бота"""
     base_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
     
-    # Add source attribution
-    footer = f"\n\n🔗 Data source: twitter.com/{TWITTER_USERNAME}"
-    message = text + footer
+    # Определить куда отправлять
+    chat_id = ADMIN_CHAT_ID if is_error else TARGET_CHAT_ID
     
-    text_limit = 4096
-    if len(message) > text_limit:
-        message = message[:text_limit]
+    # Добавить источник (только для обычных сообщений)
+    if not is_error:
+        footer = f"\n\n📊 Источник: @{LOOKONCHAIN_CHANNEL}"
+        message = text + footer
+    else:
+        message = text
+    
+    # Лимит Telegram
+    if len(message) > 4096:
+        message = message[:4000] + "..."
+        if not is_error:
+            message += footer
     
     for attempt in range(3):
         try:
             data = {
-                'chat_id': TARGET_CHAT_ID, 
+                'chat_id': chat_id,
                 'text': message,
                 'disable_web_page_preview': False
             }
             resp = requests.post(f"{base_url}/sendMessage", data=data, timeout=30)
             if resp.status_code == 200:
                 return True
+            else:
+                logger.error(f"Telegram error: {resp.text}")
         except Exception as e:
-            print(f"Telegram error (attempt {attempt+1}/3): {e}")
+            logger.error(f"Telegram error (attempt {attempt+1}/3): {e}")
             if attempt < 2:
-                time.sleep(1)
+                time.sleep(2)
     
     return False
 
+def notify_error(error_msg):
+    """Отправить уведомление об ошибке админу"""
+    try:
+        message = f"🚨 BOT ERROR\n\n{error_msg}"
+        send_to_telegram(message, is_error=True)
+    except Exception as e:
+        logger.error(f"Failed to send error notification: {e}")
+
 async def main_async():
-    print("Starting Twitter screenshot bot...")
+    """Основная логика"""
+    logger.info("Starting Telegram Lookonchain bot...")
     
-    # Initialize random seed for better randomization
-    random.seed(int(time.time()))
-    
-    screenshot_path = None
+    # Создать Telegram клиент
+    client = TelegramClient('lookonchain_session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
     
     try:
-        screenshot_path = await capture_twitter_screenshot()
+        # Подключиться
+        logger.info("Connecting to Telegram...")
+        await client.start()
+        logger.info("✅ Connected to Telegram")
         
-        if not screenshot_path:
-            print("Failed to capture screenshot")
+        # Получить канал
+        try:
+            channel = await client.get_entity(LOOKONCHAIN_CHANNEL)
+            logger.info(f"✅ Found channel: {channel.title}")
+        except Exception as e:
+            error_msg = f"Could not find channel @{LOOKONCHAIN_CHANNEL}: {e}"
+            logger.error(error_msg)
+            notify_error(error_msg)
             return
         
-        facts_list = extract_tweets_from_screenshot(screenshot_path)
-        print(f"Extracted {len(facts_list)} fact sets from screenshot")
+        # Получить последний обработанный ID
+        last_id = get_last_processed_id()
+        logger.info(f"📌 Last processed message ID: {last_id}")
         
-        if not facts_list:
-            print("No facts extracted")
+        # Получить хэши обработанных сообщений
+        processed_hashes = get_processed_hashes()
+        logger.info(f"📌 Loaded {len(processed_hashes)} processed content hashes")
+        
+        # Получить новые сообщения с обработкой FloodWait
+        messages = []
+        try:
+            async for message in client.iter_messages(channel, limit=MAX_MESSAGES_PER_RUN):
+                # Фильтрация
+                if message.pinned:
+                    logger.debug(f"⏭️  Skipping pinned message {message.id}")
+                    continue
+                
+                if not message.text or not message.text.strip():
+                    logger.debug(f"⏭️  Skipping empty message {message.id}")
+                    continue
+                
+                if message.id <= last_id:
+                    continue
+                
+                # Проверка на рекламу
+                if is_ad_or_spam(message.text):
+                    logger.info(f"⏭️  Skipping ad/spam message {message.id}")
+                    continue
+                
+                messages.append(message)
+                
+        except FloodWaitError as e:
+            logger.warning(f"⚠️  Flood wait: {e.seconds} seconds")
+            if e.seconds < 120:  # Wait if less than 2 minutes
+                logger.info(f"Waiting {e.seconds} seconds...")
+                await asyncio.sleep(e.seconds)
+                # Could retry here, but for simplicity just continue with what we have
+            else:
+                error_msg = f"Flood wait too long ({e.seconds}s), skipping this run"
+                logger.error(error_msg)
+                notify_error(error_msg)
+                return
+        
+        # Обработать в обратном порядке (от старых к новым)
+        messages.reverse()
+        
+        logger.info(f"📨 Found {len(messages)} new messages")
+        
+        if not messages:
+            logger.info("No new messages to process")
             return
         
-        # Load existing processed hashes (deque, max 10, ordered)
-        processed_hashes = get_last_processed_hashes()
-        print(f"Already processed {len(processed_hashes)} items previously")
+        # FIRST RUN PROTECTION
+        if last_id == 0 and messages:
+            latest_id = messages[-1].id
+            save_last_processed_id(latest_id)
+            logger.warning(f"⚠️  First run: saved latest ID ({latest_id}), no publishing")
+            logger.info("Run the bot again to start processing new messages")
+            return
         
         published_count = 0
+        max_processed_id = last_id
         
-        for facts in facts_list[:3]:
-            # Validate facts first
-            if not validate_facts(facts):
-                timestamp = facts.get('timestamp', 'no timestamp')
-                print(f"Skipping invalid/old facts: {facts.get('crypto', 'unknown')} (timestamp: {timestamp})")
+        for i, message in enumerate(messages):
+            logger.info(f"\n--- Processing message {message.id} ---")
+            logger.info(f"Date: {message.date}")
+            
+            # Safe text preview
+            text_preview = message.text[:100] if len(message.text) > 100 else message.text
+            logger.info(f"Text: {text_preview}...")
+            
+            # Дедупликация по content hash
+            content_hash = get_content_hash(message.text)
+            if content_hash in processed_hashes:
+                logger.info(f"⏭️  Duplicate content detected, skipping")
+                max_processed_id = max(max_processed_id, message.id)
                 continue
             
-            # Create deterministic hash
-            facts_normalized = normalize_facts_for_hash(facts)
-            facts_hash = get_content_hash(facts_normalized)
+            # Обработать через AI
+            ai_analysis = process_with_ai(message.text)
             
-            # Check if already processed
-            if facts_hash in processed_hashes:
-                print(f"Skipping duplicate (hash: {facts_hash})")
+            if not ai_analysis:
+                logger.warning("⚠️  AI processing failed or returned SKIP")
+                max_processed_id = max(max_processed_id, message.id)
                 continue
             
-            print(f"Processing facts: {str(facts)[:80]}...")
+            logger.info(f"AI analysis: {ai_analysis[:100]}...")
             
-            # Transform facts into original analysis
-            ai_analysis = process_with_ai(facts)
-            
-            if not ai_analysis or len(ai_analysis) < 20:
-                print("AI analysis too short, skipping")
-                continue
-            
+            # Отправить в свой канал
             success = send_to_telegram(ai_analysis)
             
             if success:
-                # Add to deque (automatically maintains max 10)
-                processed_hashes.append(facts_hash)
                 published_count += 1
-                print(f"✅ Published analysis ({published_count})")
+                logger.info(f"✅ Published ({published_count})")
+                
+                # Сохранить hash для дедупликации
+                save_processed_hash(content_hash)
+                processed_hashes.add(content_hash)
+                
+                # Обновить max ID
+                max_processed_id = max(max_processed_id, message.id)
             else:
-                print(f"❌ Failed to publish")
-                # Still mark as processed to avoid retry loops
-                processed_hashes.append(facts_hash)
-                continue
+                logger.error(f"❌ Failed to publish")
+                # Не увеличиваем max_processed_id - попробуем снова в следующий раз
+                break
             
-            # Random delay between posts (human-like)
-            if published_count < len(facts_list[:3]):  # Don't delay after last
-                delay = random.randint(2, 5)
-                print(f"Waiting {delay}s before next post...")
-                await asyncio.sleep(delay)
+            # Задержка между постами (кроме последнего)
+            if i < len(messages) - 1:
+                await asyncio.sleep(POST_DELAY)
         
-        # Save updated hashes (deque automatically kept last 10)
-        save_last_processed_hashes(processed_hashes)
-        print(f"\n📊 Summary: Published {published_count} items, tracking {len(processed_hashes)} hashes")
+        # Сохранить финальный ID (избегаем race condition)
+        if max_processed_id > last_id:
+            save_last_processed_id(max_processed_id)
+        
+        logger.info(f"\n📊 Summary: Published {published_count}/{len(messages)} messages")
+        
+    except Exception as e:
+        error_msg = f"Unhandled error: {e}"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        notify_error(f"{error_msg}\n\n{traceback.format_exc()[:500]}")
+        raise
     
     finally:
-        if screenshot_path:
-            try:
-                os.remove(screenshot_path)
-                print("Cleaned up screenshot")
-            except OSError as e:
-                print(f"Could not remove screenshot: {e}")
+        await client.disconnect()
+        logger.info("✅ Disconnected from Telegram")
 
 def main():
     asyncio.run(main_async())
