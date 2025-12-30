@@ -6,7 +6,6 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
-from dotenv import load_dotenv
 
 # Setup logging
 logging.basicConfig(
@@ -14,8 +13,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-load_dotenv()
 
 # Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
