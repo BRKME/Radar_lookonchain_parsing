@@ -3,6 +3,7 @@ import sys
 import time
 import hashlib
 import logging
+import html
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -84,30 +85,58 @@ def fetch_lookonchain_feeds():
         response = requests.get(LOOKONCHAIN_FEEDS_URL, headers=headers, timeout=30)
         response.raise_for_status()
         
+        # Check if response is empty
+        if not response.text or len(response.text) < 100:
+            logger.warning("Empty or too short response from website")
+            return []
+        
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Find all feed items
-        # Looking for links with pattern /feeds/NUMBER
-        feed_links = soup.find_all('a', href=lambda href: href and '/feeds/' in href and href.split('/')[-1].isdigit())
+        # Find ALL feed links (not just hot feeds)
+        feed_links = soup.find_all('a', href=True)
         
         feeds = []
-        for link in feed_links[:20]:  # Get top 20
-            feed_id = link['href'].split('/')[-1]
+        seen_ids = set()
+        
+        for link in feed_links:
+            href = link.get('href', '')
             
-            # Get title (text content of the link)
-            title = link.get_text(strip=True)
-            
-            # Get date if available (usually nearby)
-            date_elem = link.find_next('time') or link.find_previous('time')
-            date = date_elem.get_text(strip=True) if date_elem else ""
-            
-            if title and feed_id:
-                feeds.append({
-                    'id': feed_id,
-                    'title': title,
-                    'date': date,
-                    'url': f"https://www.lookonchain.com/feeds/{feed_id}"
-                })
+            # Check if it's a feed link
+            if href.startswith('/feeds/') and href.count('/') == 2:
+                try:
+                    feed_id = href.split('/')[-1]
+                    
+                    # Skip if not a number or already seen
+                    if not feed_id.isdigit() or feed_id in seen_ids:
+                        continue
+                    
+                    seen_ids.add(feed_id)
+                    
+                    # Get title
+                    title = html.unescape(link.get_text(strip=True))
+                    
+                    # Skip if title is empty or too short
+                    if not title or len(title) < 10:
+                        continue
+                    
+                    # Get date if available
+                    date_elem = link.find_next_sibling() or link.find_next()
+                    date = ""
+                    if date_elem and date_elem.name == 'time':
+                        date = date_elem.get_text(strip=True)
+                    
+                    feeds.append({
+                        'id': feed_id,
+                        'title': title,
+                        'date': date,
+                        'url': f"https://www.lookonchain.com/feeds/{feed_id}"
+                    })
+                    
+                except (ValueError, IndexError, AttributeError):
+                    continue
+        
+        # Sort by ID descending (newest first)
+        feeds.sort(key=lambda x: int(x['id']), reverse=True)
         
         logger.info(f"Found {len(feeds)} feeds on page")
         return feeds
@@ -225,6 +254,7 @@ def main():
         
         # Get last processed ID
         last_id = get_last_processed_id()
+        last_id_int = int(last_id) if last_id else 0
         logger.info(f"Last processed ID: {last_id}")
         
         # Get processed hashes
@@ -234,8 +264,9 @@ def main():
         # Filter new feeds
         new_feeds = []
         for feed in feeds:
-            if feed['id'] <= last_id:
-                break  # Feeds are ordered newest first, stop when we hit a seen ID
+            feed_id_int = int(feed['id'])
+            if feed_id_int <= last_id_int:
+                continue  # Skip old feeds, don't break (might have unsorted IDs)
             new_feeds.append(feed)
         
         new_feeds.reverse()  # Process oldest first
@@ -247,14 +278,14 @@ def main():
             return
         
         # FIRST RUN PROTECTION
-        if not last_id and new_feeds:
-            latest_id = new_feeds[-1]['id']
+        if last_id_int == 0 and new_feeds:
+            latest_id = new_feeds[-1]['id']  # Last after reverse = newest
             save_last_processed_id(latest_id)
             logger.warning(f"First run: saved latest ID ({latest_id}), no publishing")
             return
         
         published_count = 0
-        max_processed_id = last_id
+        max_processed_id_int = last_id_int
         
         for i, feed in enumerate(new_feeds[:MAX_FEEDS_PER_RUN]):
             logger.info(f"\n--- Processing feed {feed['id']} ---")
@@ -265,7 +296,7 @@ def main():
             content_hash = get_content_hash(feed['title'])
             if content_hash in processed_hashes:
                 logger.info("Duplicate content detected, skipping")
-                max_processed_id = feed['id']
+                max_processed_id_int = max(max_processed_id_int, int(feed['id']))
                 continue
             
             # Process with AI
@@ -273,7 +304,7 @@ def main():
             
             if not ai_analysis:
                 logger.warning("AI processing failed")
-                max_processed_id = feed['id']
+                max_processed_id_int = max(max_processed_id_int, int(feed['id']))
                 continue
             
             logger.info(f"AI analysis: {ai_analysis[:100]}...")
@@ -288,18 +319,18 @@ def main():
                 save_processed_hash(content_hash)
                 processed_hashes.add(content_hash)
                 
-                max_processed_id = feed['id']
+                max_processed_id_int = max(max_processed_id_int, int(feed['id']))
             else:
                 logger.error("Failed to publish")
                 break
             
             # Delay between posts
-            if i < len(new_feeds) - 1:
+            if i < min(len(new_feeds), MAX_FEEDS_PER_RUN) - 1:
                 time.sleep(POST_DELAY)
         
         # Save final ID
-        if max_processed_id and max_processed_id > last_id:
-            save_last_processed_id(max_processed_id)
+        if max_processed_id_int > last_id_int:
+            save_last_processed_id(str(max_processed_id_int))
         
         logger.info(f"\n📊 Summary: Published {published_count}/{len(new_feeds[:MAX_FEEDS_PER_RUN])} feeds")
         
