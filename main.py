@@ -149,7 +149,7 @@ def fetch_new_feeds(last_id):
     return new_feeds
 
 def process_with_ai(content):
-    """Process content through OpenAI - analyze for Telegram format"""
+    """Process content through OpenAI - analyze for Telegram format with sentiment"""
     if len(content) > 3000:
         content = content[:3000] + "..."
         logger.warning("Content truncated to 3000 chars")
@@ -161,49 +161,82 @@ def process_with_ai(content):
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are a crypto analyst. Create a BRIEF Telegram post in English.
+                        "content": """You are a crypto analyst. Create a BRIEF Telegram post with sentiment analysis.
 
 CRITICAL RULES:
-1. Maximum 280 characters (Twitter-style brevity)
+1. Maximum 280 characters for the main text
 2. 2-3 sentences ONLY
 3. Include key numbers, tickers, amounts
 4. Use professional crypto terminology
 5. NO hashtags, NO emojis
 6. Completely rewrite - NEVER copy exact phrases from source
 
-Format: 
-- First sentence: Main event
-- Second sentence: Key details (numbers/tickers)
-- Optional third: Context/impact
+SENTIMENT ANALYSIS:
+Determine the market context/sentiment from this news:
+- Strong negative: Major hacks, crashes, regulatory crackdowns, bankruptcies
+- Moderate negative: Price drops, negative predictions, concerns, warnings
+- Slight negative: Minor setbacks, caution, uncertainty
+- Neutral: Announcements, statistics, routine updates
+- Slight positive: Small gains, minor good news, potential opportunities
+- Moderate positive: Significant gains, good predictions, partnerships, adoptions
+- Strong positive: Major breakthroughs, massive gains, revolutionary developments
 
-Example good output:
-"Arthur Hayes, Tom Lee, and Michael Saylor's 2025 Bitcoin predictions fell short. Hayes forecasted $200K+, Lee predicted $250K, while Saylor expected $150K by year-end. All targets remain unmet as 2025 concludes."
+OUTPUT FORMAT (JSON):
+{
+  "text": "Your brief analysis here (max 280 chars)",
+  "sentiment": "Moderate negative"
+}
 
-If you cannot create original brief text - respond "SKIP"."""
+Example:
+{
+  "text": "Arthur Hayes, Tom Lee, and Michael Saylor's 2025 Bitcoin predictions fell short. Hayes forecasted $200K+, Lee predicted $250K, while Saylor expected $150K by year-end.",
+  "sentiment": "Moderate negative"
+}
+
+If you cannot create original brief text - respond with: {"text": "SKIP", "sentiment": "Neutral"}"""
                     },
                     {
                         "role": "user",
-                        "content": f"News content:\n\n{content}\n\nYour brief Telegram post (max 280 chars):"
+                        "content": f"News content:\n\n{content}\n\nYour analysis (JSON only):"
                     }
                 ],
-                max_tokens=150,
+                max_tokens=200,
                 temperature=0.7,
                 timeout=OPENAI_TIMEOUT
             )
             
             result = response.choices[0].message.content.strip()
             
-            if result == "SKIP" or len(result) < 20:
-                logger.warning("AI refused or result too short")
+            # Parse JSON response
+            try:
+                # Remove markdown code blocks if present
+                if result.startswith('```'):
+                    result = result.split('```')[1]
+                    if result.startswith('json'):
+                        result = result[4:]
+                    result = result.strip()
+                
+                import json
+                data = json.loads(result)
+                
+                text = data.get('text', '').strip()
+                sentiment = data.get('sentiment', 'Neutral').strip()
+                
+                if text == "SKIP" or len(text) < 20:
+                    logger.warning("AI refused or result too short")
+                    return None
+                
+                # Ensure it's not too long
+                if len(text) > 400:
+                    logger.warning(f"AI output too long ({len(text)} chars), truncating")
+                    text = text[:397] + "..."
+                
+                logger.info(f"AI output length: {len(text)} chars, sentiment: {sentiment}")
+                return {'text': text, 'sentiment': sentiment}
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON: {e}, raw: {result}")
                 return None
-            
-            # Ensure it's not too long for Telegram
-            if len(result) > 400:
-                logger.warning(f"AI output too long ({len(result)} chars), truncating")
-                result = result[:397] + "..."
-            
-            logger.info(f"AI output length: {len(result)} chars")
-            return result
             
         except Exception as e:
             logger.error(f"OpenAI error (attempt {attempt+1}/3): {e}")
@@ -212,21 +245,23 @@ If you cannot create original brief text - respond "SKIP"."""
     
     return None
 
-def send_to_telegram(text, is_error=False):
+def send_to_telegram(analysis_data, is_error=False):
     """Send message to Telegram"""
     base_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
     chat_id = ADMIN_CHAT_ID if is_error else TARGET_CHAT_ID
     
-    if not is_error:
-        footer = "\n\n📊 Источник: Lookonchain"
-        message = text + footer
+    if is_error:
+        message = analysis_data  # For errors, data is just text
     else:
-        message = text
+        # For normal posts, data is dict with text and sentiment
+        text = analysis_data.get('text', '')
+        sentiment = analysis_data.get('sentiment', 'Neutral')
+        
+        # Format: [text]\n\nContext: [sentiment]
+        message = f"{text}\n\nContext: {sentiment}"
     
     if len(message) > 4096:
-        message = message[:4000] + "..."
-        if not is_error:
-            message += footer
+        message = message[:4090] + "..."
     
     for attempt in range(3):
         try:
@@ -309,7 +344,7 @@ def main():
                 max_processed_id_int = max(max_processed_id_int, feed['id'])
                 continue
             
-            logger.info(f"AI analysis: {ai_analysis[:100]}...")
+            logger.info(f"AI analysis: {ai_analysis.get('text', '')[:100]}... | Sentiment: {ai_analysis.get('sentiment', 'N/A')}")
             
             # Send to Telegram
             success = send_to_telegram(ai_analysis)
