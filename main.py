@@ -1,7 +1,8 @@
 import os
 import sys
 import time
-import hashlib
+import json
+import traceback
 import logging
 import html
 import requests
@@ -67,11 +68,6 @@ def save_processed_hash(content_hash):
     with open('processed_hashes.txt', 'a') as f:
         f.write(f"{content_hash}\n")
 
-def get_content_hash(text):
-    """Create hash for deduplication"""
-    normalized = ' '.join(text.lower().split())
-    return hashlib.md5(normalized.encode()).hexdigest()
-
 def fetch_new_feeds(last_id):
     """Find new feeds by trying incremental IDs"""
     new_feeds = []
@@ -103,9 +99,8 @@ def fetch_new_feeds(last_id):
             # Find title
             title_elem = soup.find('h1')
             if not title_elem:
-                logger.warning(f"Feed {current_id}: no title found, skipping")
-                current_id += 1
-                continue
+                logger.warning(f"Feed {current_id}: no title found, will retry next run")
+                break  # Stop here to retry this ID next run
             
             title = html.unescape(title_elem.get_text(strip=True))
             
@@ -123,9 +118,8 @@ def fetch_new_feeds(last_id):
             full_content = '\n\n'.join(content_paragraphs)
             
             if not full_content or len(full_content) < 50:
-                logger.warning(f"Feed {current_id}: content too short, skipping")
-                current_id += 1
-                continue
+                logger.warning(f"Feed {current_id}: content too short, will retry next run")
+                break  # Stop here to retry this ID next run
             
             # Success!
             new_feeds.append({
@@ -211,12 +205,13 @@ If you cannot create original brief text - respond with: {"text": "SKIP", "senti
             try:
                 # Remove markdown code blocks if present
                 if result.startswith('```'):
-                    result = result.split('```')[1]
-                    if result.startswith('json'):
-                        result = result[4:]
-                    result = result.strip()
+                    parts = result.split('```')
+                    if len(parts) >= 2:
+                        result = parts[1]
+                        if result.startswith('json'):
+                            result = result[4:]
+                        result = result.strip()
                 
-                import json
                 data = json.loads(result)
                 
                 text = data.get('text', '').strip()
@@ -245,7 +240,7 @@ If you cannot create original brief text - respond with: {"text": "SKIP", "senti
     
     return None
 
-def send_to_telegram(analysis_data, is_error=False):
+def send_to_telegram(analysis_data, feed_title=None, is_error=False):
     """Send message to Telegram"""
     base_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
     chat_id = ADMIN_CHAT_ID if is_error else TARGET_CHAT_ID
@@ -257,9 +252,36 @@ def send_to_telegram(analysis_data, is_error=False):
         text = analysis_data.get('text', '')
         sentiment = analysis_data.get('sentiment', 'Neutral')
         
-        # Format: [text]\n\nContext: [sentiment]
-        message = f"{text}\n\nContext: {sentiment}"
+        # Truncate title if too long (preserve sentiment)
+        max_title_len = 200
+        if feed_title and len(feed_title) > max_title_len:
+            feed_title = feed_title[:max_title_len] + "..."
+        
+        # Format with title if provided
+        if feed_title:
+            message = f"📰 {feed_title}\n\n{text}\n\nContext: {sentiment}"
+        else:
+            message = f"{text}\n\nContext: {sentiment}"
+        
+        # Smart truncation - preserve sentiment at the end
+        if len(message) > 4096:
+            # Calculate space for text
+            footer = f"\n\nContext: {sentiment}"
+            header = f"📰 {feed_title}\n\n" if feed_title else ""
+            max_text_len = 4096 - len(header) - len(footer) - 3  # -3 for "..."
+            
+            if max_text_len > 100:  # Ensure reasonable text length
+                text = text[:max_text_len] + "..."
+                message = f"{header}{text}{footer}"
+            else:
+                # If title too long, truncate it more aggressively
+                feed_title = feed_title[:100] + "..." if feed_title else ""
+                header = f"📰 {feed_title}\n\n" if feed_title else ""
+                max_text_len = 4096 - len(header) - len(footer) - 3
+                text = text[:max_text_len] + "..."
+                message = f"{header}{text}{footer}"
     
+    # Final safety check
     if len(message) > 4096:
         message = message[:4090] + "..."
     
@@ -297,7 +319,11 @@ def main():
     try:
         # Get last processed ID
         last_id_str = get_last_processed_id()
-        last_id_int = int(last_id_str) if last_id_str else 0
+        try:
+            last_id_int = int(last_id_str) if last_id_str else 0
+        except (ValueError, TypeError):
+            logger.error(f"Invalid last_feed_id: '{last_id_str}', resetting to 0")
+            last_id_int = 0
         logger.info(f"Last processed ID: {last_id_int}")
         
         # FIRST RUN PROTECTION
@@ -329,10 +355,10 @@ def main():
             logger.info(f"Time: {feed['time']}")
             logger.info(f"Content length: {len(feed['content'])} chars")
             
-            # Deduplication by title
-            content_hash = get_content_hash(feed['title'])
-            if content_hash in processed_hashes:
-                logger.info("Duplicate content detected, skipping")
+            # Deduplication by feed ID (not title!)
+            feed_id_str = str(feed['id'])
+            if feed_id_str in processed_hashes:
+                logger.info("Feed already processed, skipping")
                 max_processed_id_int = max(max_processed_id_int, feed['id'])
                 continue
             
@@ -346,20 +372,21 @@ def main():
             
             logger.info(f"AI analysis: {ai_analysis.get('text', '')[:100]}... | Sentiment: {ai_analysis.get('sentiment', 'N/A')}")
             
-            # Send to Telegram
-            success = send_to_telegram(ai_analysis)
+            # CRITICAL: Save feed ID BEFORE sending to prevent duplicates if Telegram fails
+            save_processed_hash(feed_id_str)
+            processed_hashes.add(feed_id_str)
+            max_processed_id_int = max(max_processed_id_int, feed['id'])
+            
+            # Send to Telegram with original title
+            success = send_to_telegram(ai_analysis, feed_title=feed['title'])
             
             if success:
                 published_count += 1
                 logger.info(f"✅ Published ({published_count})")
-                
-                save_processed_hash(content_hash)
-                processed_hashes.add(content_hash)
-                
-                max_processed_id_int = max(max_processed_id_int, feed['id'])
             else:
-                logger.error("Failed to publish")
-                break
+                logger.error("Failed to publish to Telegram (feed marked as processed to avoid retry loop)")
+                # Continue to next feed instead of breaking
+                # Feed is already in processed_hashes so won't be retried
             
             # Delay between posts
             if i < min(len(new_feeds), MAX_FEEDS_PER_RUN) - 1:
@@ -374,7 +401,6 @@ def main():
     except Exception as e:
         error_msg = f"Unhandled error: {e}"
         logger.error(error_msg)
-        import traceback
         logger.error(traceback.format_exc())
         notify_error(f"{error_msg}\n\n{traceback.format_exc()[:500]}")
         raise
