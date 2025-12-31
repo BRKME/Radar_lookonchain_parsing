@@ -109,12 +109,29 @@ def fetch_new_feeds(last_id):
             time_text = time_elem if isinstance(time_elem, str) else (time_elem.get_text(strip=True) if time_elem else "")
             
             # Find main content (paragraphs after title)
+            # Exclude common boilerplate phrases that might cause confusion
+            exclude_phrases = [
+                'related news',
+                'similar articles',
+                'you might also like',
+                'recommended for you',
+                'trending now',
+                'popular articles'
+            ]
+            
             content_paragraphs = []
             for p in soup.find_all('p'):
                 text = p.get_text(strip=True)
                 if text and len(text) > 20:  # Skip very short paragraphs
+                    # Skip if contains exclude phrases
+                    text_lower = text.lower()
+                    if any(phrase in text_lower for phrase in exclude_phrases):
+                        logger.info(f"Skipping paragraph with boilerplate: {text[:50]}...")
+                        continue
                     content_paragraphs.append(html.unescape(text))
             
+            # Take first 10 paragraphs max to avoid related news at bottom
+            content_paragraphs = content_paragraphs[:10]
             full_content = '\n\n'.join(content_paragraphs)
             
             if not full_content or len(full_content) < 50:
@@ -142,7 +159,7 @@ def fetch_new_feeds(last_id):
     logger.info(f"Found {len(new_feeds)} new feeds")
     return new_feeds
 
-def process_with_ai(content):
+def process_with_ai(content, feed_title):
     """Process content through OpenAI - analyze for Telegram format with sentiment"""
     if len(content) > 3000:
         content = content[:3000] + "..."
@@ -164,6 +181,7 @@ CRITICAL RULES:
 4. Use professional crypto terminology
 5. NO hashtags, NO emojis
 6. Completely rewrite - NEVER copy exact phrases from source
+7. FOCUS ON THE TITLE - your summary must match the article title!
 
 SENTIMENT ANALYSIS:
 Determine the market context/sentiment from this news:
@@ -191,11 +209,11 @@ If you cannot create original brief text - respond with: {"text": "SKIP", "senti
                     },
                     {
                         "role": "user",
-                        "content": f"News content:\n\n{content}\n\nYour analysis (JSON only):"
+                        "content": f"Article Title: {feed_title}\n\nNews content:\n\n{content}\n\nYour analysis (JSON only, must relate to the title):"
                     }
                 ],
                 max_tokens=200,
-                temperature=0.7,
+                temperature=0.9,  # Increased for more variety
                 timeout=OPENAI_TIMEOUT
             )
             
@@ -363,7 +381,11 @@ def main():
                 continue
             
             # Process FULL content with AI
-            ai_analysis = process_with_ai(feed['content'])
+            logger.info(f"=== CONTENT FOR AI (first 500 chars) ===")
+            logger.info(feed['content'][:500])
+            logger.info(f"=== END CONTENT (total {len(feed['content'])} chars) ===")
+            
+            ai_analysis = process_with_ai(feed['content'], feed['title'])
             
             if not ai_analysis:
                 logger.warning("AI processing failed")
