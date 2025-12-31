@@ -37,19 +37,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Create files if they don't exist
-          touch last_feed_id.txt
-          touch processed_hashes.txt
-          
           # Add state files
-          git add last_feed_id.txt
-          git add processed_hashes.txt
+          git add -f last_feed_id.txt processed_hashes.txt
           
-          # Commit if there are changes
-          if git diff --staged --quiet; then
-            echo "No state changes to commit"
+          # Commit and push
+          if ! git diff --cached --quiet; then
+            git commit -m "Update state [skip ci]"
+            git push
+            echo "✅ State saved"
           else
-            git commit -m "Update scraper state [skip ci]" || true
-            git push || true
-            echo "✅ State committed"
+            echo "No changes"
           fi
