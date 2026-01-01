@@ -119,6 +119,19 @@ def fetch_new_feeds(last_id):
                 'popular articles'
             ]
             
+            # Detect Related News by linking words (they introduce unrelated context)
+            related_news_indicators = [
+                'meanwhile,',
+                'additionally,',
+                'concurrently,',
+                'however,',
+                'notably,',
+                'in other news,',
+                'separately,',
+                'furthermore,',
+                'moreover,'
+            ]
+            
             content_paragraphs = []
             for p in soup.find_all('p'):
                 text = p.get_text(strip=True)
@@ -126,12 +139,18 @@ def fetch_new_feeds(last_id):
                     # Skip if contains exclude phrases
                     text_lower = text.lower()
                     if any(phrase in text_lower for phrase in exclude_phrases):
-                        logger.info(f"Skipping paragraph with boilerplate: {text[:50]}...")
+                        logger.info(f"Skipping boilerplate paragraph: {text[:50]}...")
                         continue
+                    
+                    # Skip paragraphs starting with linking words (likely Related News)
+                    if any(text_lower.startswith(indicator) for indicator in related_news_indicators):
+                        logger.info(f"Skipping Related News paragraph: {text[:50]}...")
+                        break  # Stop processing - rest is Related News
+                    
                     content_paragraphs.append(html.unescape(text))
             
-            # Take first 10 paragraphs max to avoid related news at bottom
-            content_paragraphs = content_paragraphs[:10]
+            # Take first 5 paragraphs max (more aggressive filtering)
+            content_paragraphs = content_paragraphs[:5]
             full_content = '\n\n'.join(content_paragraphs)
             
             if not full_content or len(full_content) < 50:
