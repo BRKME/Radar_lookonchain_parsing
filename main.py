@@ -108,43 +108,34 @@ def fetch_new_feeds(last_id):
             time_elem = soup.find('time') or soup.find(string=lambda text: text and 'ago' in text)
             time_text = time_elem if isinstance(time_elem, str) else (time_elem.get_text(strip=True) if time_elem else "")
             
-            # Robust parser: collect ALL paragraphs, then filter by position relative to title
-            all_paragraphs = []
-            for p in soup.find_all('p'):
-                text = p.get_text(strip=True)
-                if text and len(text) > 30:  # Skip very short paragraphs
-                    all_paragraphs.append(html.unescape(text))
-            
-            if not all_paragraphs:
-                logger.warning(f"Feed {current_id}: no paragraphs found, will retry")
-                break
-            
-            # Find where main content starts (skip paragraphs that might be before title)
-            # and stop at "Relevant content" markers
+            # Critical: Get paragraphs AFTER title element using find_all_next()
             content_paragraphs = []
             stop_markers = ['relevant content', 'source:', 'add to favorites', 'download image', 'share x']
             
-            for para in all_paragraphs:
-                para_lower = para.lower()
+            for p in title_elem.find_all_next('p'):
+                text = p.get_text(strip=True)
                 
-                # Stop if we hit a marker
-                if any(marker in para_lower for marker in stop_markers):
-                    logger.info(f"Found stop marker in paragraph: {para[:50]}...")
+                if not text or len(text) < 30:
+                    continue
+                
+                # Stop at markers
+                text_lower = text.lower()
+                if any(marker in text_lower for marker in stop_markers):
+                    logger.info(f"Found stop marker: {text[:50]}...")
                     break
                 
-                # Collect paragraph
-                content_paragraphs.append(para)
+                content_paragraphs.append(html.unescape(text))
                 
-                # Stop after 5 paragraphs (enough for main article)
+                # Stop after 5 paragraphs
                 if len(content_paragraphs) >= 5:
                     break
             
             if not content_paragraphs:
-                logger.warning(f"Feed {current_id}: no content paragraphs found, will retry")
+                logger.warning(f"Feed {current_id}: no paragraphs after title, will retry")
                 break
             
             full_content = '\n\n'.join(content_paragraphs)
-            logger.info(f"Collected {len(content_paragraphs)} paragraphs ({len(full_content)} chars)")
+            logger.info(f"Collected {len(content_paragraphs)} paragraphs AFTER title ({len(full_content)} chars)")
             
             if not full_content or len(full_content) < 50:
                 logger.warning(f"Feed {current_id}: content too short, will retry next run")
