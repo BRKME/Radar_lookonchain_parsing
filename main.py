@@ -108,34 +108,42 @@ def fetch_new_feeds(last_id):
             time_elem = soup.find('time') or soup.find(string=lambda text: text and 'ago' in text)
             time_text = time_elem if isinstance(time_elem, str) else (time_elem.get_text(strip=True) if time_elem else "")
             
-            # Critical: Get paragraphs AFTER title element using find_all_next()
+            # Proven working parser: collect ALL paragraphs, then filter with stop markers
+            all_paragraphs = []
+            for p in soup.find_all('p'):
+                text = p.get_text(strip=True)
+                if text and len(text) > 30:  # Skip very short paragraphs
+                    all_paragraphs.append(html.unescape(text))
+            
+            if not all_paragraphs:
+                logger.warning(f"Feed {current_id}: no paragraphs found, will retry")
+                break
+            
+            # Filter with stop markers for "Relevant content" section
             content_paragraphs = []
             stop_markers = ['relevant content', 'source:', 'add to favorites', 'download image', 'share x']
             
-            for p in title_elem.find_all_next('p'):
-                text = p.get_text(strip=True)
+            for para in all_paragraphs:
+                para_lower = para.lower()
                 
-                if not text or len(text) < 30:
-                    continue
-                
-                # Stop at markers
-                text_lower = text.lower()
-                if any(marker in text_lower for marker in stop_markers):
-                    logger.info(f"Found stop marker: {text[:50]}...")
+                # Stop if we hit a marker
+                if any(marker in para_lower for marker in stop_markers):
+                    logger.info(f"Found stop marker: {para[:50]}...")
                     break
                 
-                content_paragraphs.append(html.unescape(text))
+                # Collect paragraph
+                content_paragraphs.append(para)
                 
-                # Stop after 5 paragraphs
+                # Stop after 5 paragraphs (enough for main article)
                 if len(content_paragraphs) >= 5:
                     break
             
             if not content_paragraphs:
-                logger.warning(f"Feed {current_id}: no paragraphs after title, will retry")
+                logger.warning(f"Feed {current_id}: no content paragraphs found, will retry")
                 break
             
             full_content = '\n\n'.join(content_paragraphs)
-            logger.info(f"Collected {len(content_paragraphs)} paragraphs AFTER title ({len(full_content)} chars)")
+            logger.info(f"Collected {len(content_paragraphs)} paragraphs ({len(full_content)} chars)")
             
             if not full_content or len(full_content) < 50:
                 logger.warning(f"Feed {current_id}: content too short, will retry next run")
@@ -200,12 +208,15 @@ FORMATTING RULES:
    - Use ONLY functional tags: #BTC #ETH #Altcoins #DeFi #Markets #Macro #Stablecoins
    - Match tags to article content (e.g., if Bitcoin mentioned → #BTC)
 
+7. NO NEWLINES in JSON values - use spaces instead
+
 FORBIDDEN:
 - More than 1 emoji
 - CAPS LOCK
 - Words like "URGENT", "SHOCK", "ROCKET", "100x"
 - Emotional opinions or trading advice
 - Excessive exclamation marks
+- Newlines (\n) inside JSON string values
 
 SENTIMENT:
 - Strong negative: Major hacks, crashes, bankruptcies
@@ -216,15 +227,15 @@ SENTIMENT:
 - Moderate positive: Significant gains, partnerships
 - Strong positive: Major breakthroughs, massive gains
 
-OUTPUT FORMAT (JSON):
+OUTPUT FORMAT (JSON, single line):
 {
-  "text": "[emoji] [Headline]\n\n[Body text]\n\nContext: [sentiment]\n\n[hashtags]",
+  "text": "[emoji] [Headline] - [Body text] Context: [sentiment] [hashtags]",
   "sentiment": "[sentiment value]"
 }
 
 EXAMPLE:
 {
-  "text": "📊 BTC ETF Records $2.1B Weekly Inflows\n\nUS Bitcoin spot ETFs saw strongest week since launch with institutional buying driving momentum. Total AUM now exceeds $50B.\n\nContext: Moderate positive\n\n#BTC #Markets",
+  "text": "📊 BTC ETF Records $2.1B Weekly Inflows - US Bitcoin spot ETFs saw strongest week since launch with institutional buying driving momentum. Total AUM now exceeds $50B. Context: Moderate positive #BTC #Markets",
   "sentiment": "Moderate positive"
 }
 
@@ -253,6 +264,9 @@ CRITICAL: Write ONLY about the article TITLE topic. If content doesn't match tit
                             result = result[4:]
                         result = result.strip()
                 
+                # Fix: Replace control characters that break JSON parsing
+                result = result.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                
                 data = json.loads(result)
                 
                 text = data.get('text', '').strip()
@@ -262,6 +276,18 @@ CRITICAL: Write ONLY about the article TITLE topic. If content doesn't match tit
                     logger.warning(f"AI refused or result too short (text='{text[:50] if text else 'empty'}', len={len(text)})")
                     logger.warning(f"This likely means content doesn't match title: {feed_title[:80]}")
                     return None
+                
+                # Add newlines for readability if missing
+                # Format should be: "[content] Context: [sentiment] [hashtags]"
+                # Add newlines before "Context:" and before hashtags
+                if 'Context:' in text and '\n' not in text:
+                    text = text.replace(' Context:', '\n\nContext:')
+                    # Add newline before first hashtag if present
+                    if ' #' in text:
+                        # Find first hashtag
+                        hashtag_pos = text.find(' #')
+                        if hashtag_pos > 0:
+                            text = text[:hashtag_pos] + '\n\n' + text[hashtag_pos:].strip()
                 
                 # Ensure it's not too long (500 chars total post limit)
                 if len(text) > 500:
