@@ -23,9 +23,9 @@ TARGET_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID', TARGET_CHAT_ID)
 
 # Settings
-MAX_FEEDS_PER_RUN = 3
+MAX_FEEDS_PER_RUN = 6  # Optimal: 6 × 48 runs = 288 feeds/day (prevents backlog)
 OPENAI_TIMEOUT = 15
-POST_DELAY = 2
+POST_DELAY = 2  # Safe for Telegram limits
 
 # Validate environment variables
 required_vars = {
@@ -72,7 +72,7 @@ def fetch_new_feeds(last_id):
     """Find new feeds by trying incremental IDs"""
     new_feeds = []
     current_id = last_id + 1
-    max_new_feeds = 5
+    max_new_feeds = 10  # Fetch more than process to ensure we always have enough
     
     while len(new_feeds) < max_new_feeds:
         feed_url = f"https://www.lookonchain.com/feeds/{current_id}"
@@ -104,29 +104,26 @@ def fetch_new_feeds(last_id):
             time_elem = soup.find('time') or soup.find(string=lambda text: text and 'ago' in text)
             time_text = time_elem if isinstance(time_elem, str) else (time_elem.get_text(strip=True) if time_elem else "")
             
-            # PROVEN WORKING PARSER
-            all_paragraphs = []
-            for p in soup.find_all('p'):
-                text = p.get_text(strip=True)
-                if text and len(text) > 30:
-                    all_paragraphs.append(html.unescape(text))
-            
-            if not all_paragraphs:
-                logger.warning(f"Feed {current_id}: no paragraphs found, will retry")
-                break
-            
+            # CRITICAL FIX: Use find_all_next to get paragraphs AFTER title element
             content_paragraphs = []
             stop_markers = ['relevant content', 'source:', 'add to favorites', 'download image', 'share x']
             
-            for para in all_paragraphs:
-                para_lower = para.lower()
+            # Get paragraphs that come AFTER title in DOM
+            for p in title_elem.find_all_next('p'):
+                text = p.get_text(strip=True)
                 
-                if any(marker in para_lower for marker in stop_markers):
-                    logger.info(f"Found stop marker: {para[:50]}...")
+                if not text or len(text) < 30:
+                    continue
+                
+                # Stop at markers
+                text_lower = text.lower()
+                if any(marker in text_lower for marker in stop_markers):
+                    logger.info(f"Found stop marker: {text[:50]}...")
                     break
                 
-                content_paragraphs.append(para)
+                content_paragraphs.append(html.unescape(text))
                 
+                # Stop after 5 paragraphs
                 if len(content_paragraphs) >= 5:
                     break
             
