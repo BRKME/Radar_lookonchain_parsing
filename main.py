@@ -104,35 +104,36 @@ def fetch_new_feeds(last_id):
             time_elem = soup.find('time') or soup.find(string=lambda text: text and 'ago' in text)
             time_text = time_elem if isinstance(time_elem, str) else (time_elem.get_text(strip=True) if time_elem else "")
             
-            # CRITICAL FIX: Use find_all_next to get paragraphs AFTER title element
-            content_paragraphs = []
-            stop_markers = ['relevant content', 'source:', 'add to favorites', 'download image', 'share x']
+            # CORRECT FIX: Get content from detail_content div
+            # Main content is NOT in <p> tags, it's direct text in div.detail_content
+            detail_content_div = soup.find('div', class_='detail_content')
             
-            # Get paragraphs that come AFTER title in DOM
-            for p in title_elem.find_all_next('p'):
-                text = p.get_text(strip=True)
+            if detail_content_div:
+                # Get all text from detail_content div
+                full_content = html.unescape(detail_content_div.get_text(strip=True))
+                logger.info(f"Found detail_content div ({len(full_content)} chars)")
+            else:
+                # Fallback: if no detail_content div, try old method
+                logger.warning(f"Feed {current_id}: no detail_content div found, using fallback")
+                content_paragraphs = []
+                stop_markers = ['relevant content', 'source:', 'add to favorites']
                 
-                if not text or len(text) < 30:
-                    continue
+                for p in soup.find_all('p'):
+                    text = p.get_text(strip=True)
+                    if text and len(text) > 30:
+                        text_lower = text.lower()
+                        if any(marker in text_lower for marker in stop_markers):
+                            break
+                        content_paragraphs.append(html.unescape(text))
+                        if len(content_paragraphs) >= 5:
+                            break
                 
-                # Stop at markers
-                text_lower = text.lower()
-                if any(marker in text_lower for marker in stop_markers):
-                    logger.info(f"Found stop marker: {text[:50]}...")
+                if not content_paragraphs:
+                    logger.warning(f"Feed {current_id}: no content found, will retry")
                     break
                 
-                content_paragraphs.append(html.unescape(text))
-                
-                # Stop after 5 paragraphs
-                if len(content_paragraphs) >= 5:
-                    break
-            
-            if not content_paragraphs:
-                logger.warning(f"Feed {current_id}: no content paragraphs found, will retry")
-                break
-            
-            full_content = '\n\n'.join(content_paragraphs)
-            logger.info(f"Collected {len(content_paragraphs)} paragraphs ({len(full_content)} chars)")
+                full_content = '\n\n'.join(content_paragraphs)
+                logger.info(f"Fallback: collected {len(content_paragraphs)} paragraphs ({len(full_content)} chars)")
             
             if not full_content or len(full_content) < 50:
                 logger.warning(f"Feed {current_id}: content too short, will retry next run")
