@@ -23,7 +23,7 @@ TARGET_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID', TARGET_CHAT_ID)
 
 # Settings
-MAX_FEEDS_PER_RUN = 6  # Optimal: 6 × 48 runs = 288 feeds/day (prevents backlog)
+MAX_FEEDS_PER_RUN = 12  # Increased: 12 × 48 runs = 576 feeds/day (5x margin over 115/day rate)
 OPENAI_TIMEOUT = 15
 POST_DELAY = 2  # Safe for Telegram limits
 
@@ -72,7 +72,7 @@ def fetch_new_feeds(last_id):
     """Find new feeds by trying incremental IDs"""
     new_feeds = []
     current_id = last_id + 1
-    max_new_feeds = 10  # Fetch more than process to ensure we always have enough
+    max_new_feeds = 15  # Increased: fetch more to ensure buffer
     
     while len(new_feeds) < max_new_feeds:
         feed_url = f"https://www.lookonchain.com/feeds/{current_id}"
