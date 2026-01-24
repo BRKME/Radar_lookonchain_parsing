@@ -215,14 +215,55 @@ CRITICAL RULES:
 4. IGNORE any unrelated content (if Bitcoin/Ethereum not in title, don't mention them)
 5. If content doesn't match title → respond: {"text": "SKIP", "sentiment": "Neutral"}
 
-SENTIMENT (pick one):
-- Strong negative: Major hacks, crashes, bankruptcies
-- Moderate negative: Price drops, warnings, concerns
-- Slight negative: Minor setbacks, uncertainty
-- Neutral: Announcements, routine updates
-- Slight positive: Small gains, opportunities
-- Moderate positive: Significant gains, partnerships
-- Strong positive: Major breakthroughs, massive gains
+SENTIMENT CRITERIA:
+
+Strong negative:
+- Hacks/exploits with losses >$5M
+- Exchange shutdowns/bankruptcies
+- Liquidations >$100M
+- Price crashes >20% in 24h
+
+Moderate negative:
+- SHORT positions (bearish market view)
+- Losses $1M-$5M or unrealized losses
+- Selling pressure, negative premiums
+- Low win rates (<20%) even with gains
+- Price drops 10-20%
+- Transfer to exchanges (potential sell signals)
+- Uncertainty language: "concerns", "looms", "or signals"
+- Warnings/cautions even with positive metrics
+
+Slight negative:
+- Minor risks/delays mentioned
+- Progress on solving problems (implies problem exists)
+- Bottlenecks in positive growth
+- Mixed signals
+
+Neutral:
+- Strategic pivots without immediate impact
+- Routine announcements
+- Balanced updates
+
+Slight positive:
+- Small gains <10%
+- Opportunities mentioned
+- Positive developments with caveats
+
+Moderate positive:
+- Gains 10-50% with sustainability
+- ATH with strong fundamentals
+- Institutional adoption
+- Major partnerships
+- Reduce if warnings/delays present
+
+Strong positive:
+- Gains >50% with solid backing
+- Major protocol upgrades
+- Regulatory wins
+- Market leadership shifts
+
+BALANCE RULE:
+Overall context > single metric. Example: +$739k gain BUT 14.55% win rate + $598k total loss = Moderate negative
 
 OUTPUT (JSON only):
 {
@@ -298,16 +339,40 @@ def get_hashtags_from_title(title):
     title_lower = title.lower()
     hashtags = []
     
+    has_major_coin = False
+    
     if 'bitcoin' in title_lower or 'btc' in title_lower:
         hashtags.append('#BTC')
+        has_major_coin = True
     if 'ethereum' in title_lower or 'eth' in title_lower:
         hashtags.append('#ETH')
-    if any(alt in title_lower for alt in ['solana', 'sol', 'altcoin', 'token']):
-        hashtags.append('#Altcoins')
-    if any(defi in title_lower for defi in ['defi', 'staking', 'liquidity']):
+        has_major_coin = True
+    if 'solana' in title_lower or ' sol ' in title_lower or title_lower.endswith('sol'):
+        hashtags.append('#SOL')
+        has_major_coin = True
+    
+    meme_coins = ['doge', 'shib', 'pepe', 'penguin', 'bonk', 'floki', 'meme']
+    if any(meme in title_lower for meme in meme_coins):
+        hashtags.append('#Memecoins')
+    
+    if any(nft in title_lower for nft in ['nft', 'opensea', 'blur', 'nifty']):
+        hashtags.append('#NFT')
+    
+    defi_terms = ['defi', 'staking', 'liquidity', 'aave', 'uniswap', 'compound', 'yield']
+    if any(defi in title_lower for defi in defi_terms):
         hashtags.append('#DeFi')
-    if any(market in title_lower for market in ['market', 'trading', 'price', 'etf']):
+    
+    if not has_major_coin and any(alt in title_lower for alt in ['altcoin', 'token', 'coin']):
+        hashtags.append('#Altcoins')
+    
+    macro_terms = ['fed', 'fomc', 'powell', 'interest rate', 'forex', 'global', 'dollar', 'treasury']
+    if any(macro in title_lower for macro in macro_terms):
         hashtags.append('#Markets')
+    
+    whale_terms = ['whale', 'million', 'billion', 'accumulated', 'transferred']
+    if any(whale in title_lower for whale in whale_terms) and '#Memecoins' not in hashtags:
+        if len(hashtags) < 3:
+            hashtags.append('#Whales')
     
     if not hashtags:
         hashtags.append('#Markets')
