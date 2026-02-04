@@ -181,19 +181,59 @@ CRITICAL RULES:
 4. IGNORE any unrelated content (if Bitcoin/Ethereum not in title, don't mention them)
 5. If content doesn't match title → respond: {"text": "SKIP", "sentiment": "Neutral"}
 
+SENTIMENT GUIDELINES (Crypto-specific):
+
+PRICE MOVEMENTS (24h):
+- Strong negative: >5% drop OR critical level break (BTC <$75K, ETH <$2200, SOL <$120)
+- Moderate negative: 3-5% drop OR approaching key support
+- Slight negative: 1-3% drop OR minor concerns
+- Neutral: <1% change OR routine announcements
+- Slight positive: 1-3% gain OR minor good news
+- Moderate positive: 3-5% gain OR partnerships
+- Strong positive: >5% gain OR major breakthroughs
+
+UNREALIZED LOSSES:
+- Strong negative: >$1B unrealized loss OR >50% loss on position
+- Moderate negative: $100M-$1B unrealized loss OR 30-50% loss
+- Slight negative: <$100M unrealized loss OR <30% loss
+
+WHALE ACTIVITY:
+- Strong negative: Major liquidations (>100), panic selling, >$1B moves with losses
+- Moderate negative: Large CEX outflows, selling pressure, loan repayments
+- Slight negative: Profit taking, small position reduction
+- Neutral: Routine transfers, rebalancing without losses
+- Slight positive: Small accumulation, DCA buying
+- Moderate positive: Whale accumulation, institutional buying
+- Strong positive: Massive buying, supply squeeze
+
+STABLECOIN ACTIVITY:
+- Neutral to Slight positive: Large USDT/USDC mints (indicates incoming liquidity)
+- Slight negative: Large redemptions (liquidity leaving)
+
+SECTOR-WIDE EVENTS:
+- Strong negative: Mining stocks/multiple coins down >10%, sector crash
+- Moderate negative: Sector down 5-10%
+- Slight negative: Sector down <5%
+
+TRADITIONAL MARKETS (Gold, Stocks):
+- Use HALF the thresholds (e.g., -2% gold = Slight negative, not Moderate)
+
+HACKS/EXPLOITS:
+- Always "Strong negative" regardless of amount
+
 SENTIMENT (pick one):
-- Strong negative: Major hacks, crashes, bankruptcies
-- Moderate negative: Price drops, warnings, concerns
-- Slight negative: Minor setbacks, uncertainty
-- Neutral: Announcements, routine updates
-- Slight positive: Small gains, opportunities
-- Moderate positive: Significant gains, partnerships
-- Strong positive: Major breakthroughs, massive gains
+- Strong negative: Drops >5%, hacks, bankruptcies, >$1B losses, critical breaks, 262 liquidations, sector crash
+- Moderate negative: Drops 3-5%, large outflows, warnings, $100M-$1B losses
+- Slight negative: Drops 1-3%, minor setbacks, <$100M losses
+- Neutral: <1% moves, announcements, routine updates, stablecoin mints
+- Slight positive: Gains 1-3%, small opportunities, liquidity inflows
+- Moderate positive: Gains 3-5%, partnerships, institutional interest
+- Strong positive: Gains >5%, massive breakthroughs, supply shock
 
 OUTPUT (JSON only):
 {
   "text": "Your analysis (max 280 chars, about TITLE topic only)",
-  "sentiment": "Moderate negative"
+  "sentiment": "Strong negative"
 }"""
                     },
                     {
