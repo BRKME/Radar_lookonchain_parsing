@@ -23,7 +23,7 @@ TARGET_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID', TARGET_CHAT_ID)
 
 # Settings
-MAX_FEEDS_PER_RUN = 6  # Optimal: 6 × 48 runs = 288 feeds/day (prevents backlog)
+MAX_FEEDS_PER_RUN = 12  # Increased: 12 × 48 runs = 576 feeds/day (5x margin over 115/day rate)
 OPENAI_TIMEOUT = 15
 POST_DELAY = 2  # Safe for Telegram limits
 
@@ -72,9 +72,14 @@ def fetch_new_feeds(last_id):
     """Find new feeds by trying incremental IDs"""
     new_feeds = []
     current_id = last_id + 1
-    max_new_feeds = 10  # Fetch more than process to ensure we always have enough
+    max_new_feeds = 15
+    consecutive_errors = 0
+    max_consecutive_errors = 5
+    max_attempts = 50
     
-    while len(new_feeds) < max_new_feeds:
+    attempts = 0
+    while len(new_feeds) < max_new_feeds and attempts < max_attempts:
+        attempts += 1
         feed_url = f"https://www.lookonchain.com/feeds/{current_id}"
         
         try:
@@ -85,36 +90,48 @@ def fetch_new_feeds(last_id):
             response = requests.get(feed_url, headers=headers, timeout=30, allow_redirects=False)
             
             if response.status_code == 404:
-                logger.info(f"Feed {current_id}: 404 - reached end")
-                break
+                consecutive_errors += 1
+                logger.info(f"Feed {current_id}: 404 (consecutive errors: {consecutive_errors})")
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.info(f"Reached end after {consecutive_errors} consecutive 404s")
+                    break
+                current_id += 1
+                time.sleep(0.5)
+                continue
             
             if response.status_code != 200:
-                logger.warning(f"Feed {current_id}: status {response.status_code}, stopping")
-                break
+                consecutive_errors += 1
+                logger.warning(f"Feed {current_id}: status {response.status_code} (consecutive errors: {consecutive_errors})")
+                if consecutive_errors >= max_consecutive_errors:
+                    break
+                current_id += 1
+                time.sleep(0.5)
+                continue
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
             title_elem = soup.find('h1')
             if not title_elem:
-                logger.warning(f"Feed {current_id}: no title found, will retry next run")
-                break
+                consecutive_errors += 1
+                logger.warning(f"Feed {current_id}: no title (consecutive errors: {consecutive_errors})")
+                if consecutive_errors >= max_consecutive_errors:
+                    break
+                current_id += 1
+                time.sleep(0.5)
+                continue
             
             title = html.unescape(title_elem.get_text(strip=True))
             
             time_elem = soup.find('time') or soup.find(string=lambda text: text and 'ago' in text)
             time_text = time_elem if isinstance(time_elem, str) else (time_elem.get_text(strip=True) if time_elem else "")
             
-            # CORRECT FIX: Get content from detail_content div
-            # Main content is NOT in <p> tags, it's direct text in div.detail_content
             detail_content_div = soup.find('div', class_='detail_content')
             
             if detail_content_div:
-                # Get all text from detail_content div
                 full_content = html.unescape(detail_content_div.get_text(strip=True))
                 logger.info(f"Found detail_content div ({len(full_content)} chars)")
             else:
-                # Fallback: if no detail_content div, try old method
-                logger.warning(f"Feed {current_id}: no detail_content div found, using fallback")
+                logger.warning(f"Feed {current_id}: no detail_content div, using fallback")
                 content_paragraphs = []
                 stop_markers = ['relevant content', 'source:', 'add to favorites']
                 
@@ -129,15 +146,27 @@ def fetch_new_feeds(last_id):
                             break
                 
                 if not content_paragraphs:
-                    logger.warning(f"Feed {current_id}: no content found, will retry")
-                    break
+                    consecutive_errors += 1
+                    logger.warning(f"Feed {current_id}: no content (consecutive errors: {consecutive_errors})")
+                    if consecutive_errors >= max_consecutive_errors:
+                        break
+                    current_id += 1
+                    time.sleep(0.5)
+                    continue
                 
                 full_content = '\n\n'.join(content_paragraphs)
                 logger.info(f"Fallback: collected {len(content_paragraphs)} paragraphs ({len(full_content)} chars)")
             
             if not full_content or len(full_content) < 50:
-                logger.warning(f"Feed {current_id}: content too short, will retry next run")
-                break
+                consecutive_errors += 1
+                logger.warning(f"Feed {current_id}: content too short ({len(full_content)} chars), skipping (consecutive errors: {consecutive_errors})")
+                if consecutive_errors >= max_consecutive_errors:
+                    break
+                current_id += 1
+                time.sleep(0.5)
+                continue
+            
+            consecutive_errors = 0
             
             new_feeds.append({
                 'id': current_id,
@@ -150,13 +179,18 @@ def fetch_new_feeds(last_id):
             logger.info(f"✅ Feed {current_id}: {title[:60]}...")
             
         except Exception as e:
-            logger.error(f"Feed {current_id}: error - {e}, stopping")
-            break
+            consecutive_errors += 1
+            logger.error(f"Feed {current_id}: error - {e} (consecutive errors: {consecutive_errors})")
+            if consecutive_errors >= max_consecutive_errors:
+                break
+            current_id += 1
+            time.sleep(0.5)
+            continue
         
         current_id += 1
         time.sleep(0.5)
     
-    logger.info(f"Found {len(new_feeds)} new feeds")
+    logger.info(f"Found {len(new_feeds)} new feeds after {attempts} attempts")
     return new_feeds
 
 def process_with_ai(content, feed_title):
@@ -181,59 +215,60 @@ CRITICAL RULES:
 4. IGNORE any unrelated content (if Bitcoin/Ethereum not in title, don't mention them)
 5. If content doesn't match title → respond: {"text": "SKIP", "sentiment": "Neutral"}
 
-SENTIMENT GUIDELINES (Crypto-specific):
+SENTIMENT CRITERIA:
 
-PRICE MOVEMENTS (24h):
-- Strong negative: >5% drop OR critical level break (BTC <$75K, ETH <$2200, SOL <$120)
-- Moderate negative: 3-5% drop OR approaching key support
-- Slight negative: 1-3% drop OR minor concerns
-- Neutral: <1% change OR routine announcements
-- Slight positive: 1-3% gain OR minor good news
-- Moderate positive: 3-5% gain OR partnerships
-- Strong positive: >5% gain OR major breakthroughs
+Strong negative:
+- Hacks/exploits with losses >$5M
+- Exchange shutdowns/bankruptcies
+- Liquidations >$100M
+- Price crashes >20% in 24h
 
-UNREALIZED LOSSES:
-- Strong negative: >$1B unrealized loss OR >50% loss on position
-- Moderate negative: $100M-$1B unrealized loss OR 30-50% loss
-- Slight negative: <$100M unrealized loss OR <30% loss
+Moderate negative:
+- SHORT positions (bearish market view)
+- Losses $1M-$5M or unrealized losses
+- Selling pressure, negative premiums
+- Low win rates (<20%) even with gains
+- Price drops 10-20%
+- Transfer to exchanges (potential sell signals)
+- Uncertainty language: "concerns", "looms", "or signals"
+- Warnings/cautions even with positive metrics
 
-WHALE ACTIVITY:
-- Strong negative: Major liquidations (>100), panic selling, >$1B moves with losses
-- Moderate negative: Large CEX outflows, selling pressure, loan repayments
-- Slight negative: Profit taking, small position reduction
-- Neutral: Routine transfers, rebalancing without losses
-- Slight positive: Small accumulation, DCA buying
-- Moderate positive: Whale accumulation, institutional buying
-- Strong positive: Massive buying, supply squeeze
+Slight negative:
+- Minor risks/delays mentioned
+- Progress on solving problems (implies problem exists)
+- Bottlenecks in positive growth
+- Mixed signals
 
-STABLECOIN ACTIVITY:
-- Neutral to Slight positive: Large USDT/USDC mints (indicates incoming liquidity)
-- Slight negative: Large redemptions (liquidity leaving)
+Neutral:
+- Strategic pivots without immediate impact
+- Routine announcements
+- Balanced updates
 
-SECTOR-WIDE EVENTS:
-- Strong negative: Mining stocks/multiple coins down >10%, sector crash
-- Moderate negative: Sector down 5-10%
-- Slight negative: Sector down <5%
+Slight positive:
+- Small gains <10%
+- Opportunities mentioned
+- Positive developments with caveats
 
-TRADITIONAL MARKETS (Gold, Stocks):
-- Use HALF the thresholds (e.g., -2% gold = Slight negative, not Moderate)
+Moderate positive:
+- Gains 10-50% with sustainability
+- ATH with strong fundamentals
+- Institutional adoption
+- Major partnerships
+- Reduce if warnings/delays present
 
-HACKS/EXPLOITS:
-- Always "Strong negative" regardless of amount
+Strong positive:
+- Gains >50% with solid backing
+- Major protocol upgrades
+- Regulatory wins
+- Market leadership shifts
 
-SENTIMENT (pick one):
-- Strong negative: Drops >5%, hacks, bankruptcies, >$1B losses, critical breaks, 262 liquidations, sector crash
-- Moderate negative: Drops 3-5%, large outflows, warnings, $100M-$1B losses
-- Slight negative: Drops 1-3%, minor setbacks, <$100M losses
-- Neutral: <1% moves, announcements, routine updates, stablecoin mints
-- Slight positive: Gains 1-3%, small opportunities, liquidity inflows
-- Moderate positive: Gains 3-5%, partnerships, institutional interest
-- Strong positive: Gains >5%, massive breakthroughs, supply shock
+BALANCE RULE:
+Overall context > single metric. Example: +$739k gain BUT 14.55% win rate + $598k total loss = Moderate negative
 
 OUTPUT (JSON only):
 {
   "text": "Your analysis (max 280 chars, about TITLE topic only)",
-  "sentiment": "Strong negative"
+  "sentiment": "Moderate negative"
 }"""
                     },
                     {
@@ -304,16 +339,40 @@ def get_hashtags_from_title(title):
     title_lower = title.lower()
     hashtags = []
     
+    has_major_coin = False
+    
     if 'bitcoin' in title_lower or 'btc' in title_lower:
         hashtags.append('#BTC')
+        has_major_coin = True
     if 'ethereum' in title_lower or 'eth' in title_lower:
         hashtags.append('#ETH')
-    if any(alt in title_lower for alt in ['solana', 'sol', 'altcoin', 'token']):
-        hashtags.append('#Altcoins')
-    if any(defi in title_lower for defi in ['defi', 'staking', 'liquidity']):
+        has_major_coin = True
+    if 'solana' in title_lower or ' sol ' in title_lower or title_lower.endswith('sol'):
+        hashtags.append('#SOL')
+        has_major_coin = True
+    
+    meme_coins = ['doge', 'shib', 'pepe', 'penguin', 'bonk', 'floki', 'meme']
+    if any(meme in title_lower for meme in meme_coins):
+        hashtags.append('#Memecoins')
+    
+    if any(nft in title_lower for nft in ['nft', 'opensea', 'blur', 'nifty']):
+        hashtags.append('#NFT')
+    
+    defi_terms = ['defi', 'staking', 'liquidity', 'aave', 'uniswap', 'compound', 'yield']
+    if any(defi in title_lower for defi in defi_terms):
         hashtags.append('#DeFi')
-    if any(market in title_lower for market in ['market', 'trading', 'price', 'etf']):
+    
+    if not has_major_coin and any(alt in title_lower for alt in ['altcoin', 'token', 'coin']):
+        hashtags.append('#Altcoins')
+    
+    macro_terms = ['fed', 'fomc', 'powell', 'interest rate', 'forex', 'global', 'dollar', 'treasury']
+    if any(macro in title_lower for macro in macro_terms):
         hashtags.append('#Markets')
+    
+    whale_terms = ['whale', 'million', 'billion', 'accumulated', 'transferred']
+    if any(whale in title_lower for whale in whale_terms) and '#Memecoins' not in hashtags:
+        if len(hashtags) < 3:
+            hashtags.append('#Whales')
     
     if not hashtags:
         hashtags.append('#Markets')
@@ -429,14 +488,6 @@ def main():
             feed_id_str = str(feed['id'])
             if feed_id_str in processed_hashes:
                 logger.info("Feed already processed, skipping")
-                max_processed_id_int = max(max_processed_id_int, feed['id'])
-                continue
-            
-            # Filter: Skip meme coin news
-            if 'meme coin' in feed['title'].lower():
-                logger.info(f"⊘ Skipping meme coin news: {feed['title'][:80]}...")
-                save_processed_hash(feed_id_str)
-                processed_hashes.add(feed_id_str)
                 max_processed_id_int = max(max_processed_id_int, feed['id'])
                 continue
             
