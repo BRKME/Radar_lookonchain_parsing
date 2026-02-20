@@ -383,14 +383,23 @@ def send_to_telegram(analysis_data, feed_title=None, is_error=False):
         if feed_title and len(feed_title) > max_title_len:
             feed_title = feed_title[:max_title_len] + "..."
         
+        # Хэштеги вверху сообщения
         if feed_title:
-            message = f"{emoji} {feed_title}\n\n{text}\n\nContext: {sentiment}\n\n{hashtags}"
+            if hashtags:
+                message = f"{hashtags}\n\n{emoji} {feed_title}\n\n{text}\n\nContext: {sentiment}"
+            else:
+                message = f"{emoji} {feed_title}\n\n{text}\n\nContext: {sentiment}"
         else:
-            message = f"{emoji} {text}\n\nContext: {sentiment}\n\n{hashtags}"
+            if hashtags:
+                message = f"{hashtags}\n\n{emoji} {text}\n\nContext: {sentiment}"
+            else:
+                message = f"{emoji} {text}\n\nContext: {sentiment}"
         
         if len(message) > 4096:
-            footer = f"\n\nContext: {sentiment}\n\n{hashtags}"
-            header = f"{emoji} {feed_title}\n\n" if feed_title else f"{emoji} "
+            footer = f"\n\nContext: {sentiment}"
+            header = f"{hashtags}\n\n{emoji} {feed_title}\n\n" if feed_title else f"{hashtags}\n\n{emoji} "
+            if not hashtags:
+                header = f"{emoji} {feed_title}\n\n" if feed_title else f"{emoji} "
             max_text_len = 4096 - len(header) - len(footer) - 3
             
             if max_text_len > 100:
@@ -398,7 +407,9 @@ def send_to_telegram(analysis_data, feed_title=None, is_error=False):
                 message = f"{header}{text}{footer}"
             else:
                 feed_title = feed_title[:100] + "..." if feed_title else ""
-                header = f"{emoji} {feed_title}\n\n" if feed_title else f"{emoji} "
+                header = f"{hashtags}\n\n{emoji} {feed_title}\n\n" if feed_title else f"{hashtags}\n\n{emoji} "
+                if not hashtags:
+                    header = f"{emoji} {feed_title}\n\n" if feed_title else f"{emoji} "
                 max_text_len = 4096 - len(header) - len(footer) - 3
                 text = text[:max_text_len] + "..."
                 message = f"{header}{text}{footer}"
@@ -477,6 +488,29 @@ def main():
             
             if 'meme coin' in feed['title'].lower():
                 logger.info(f"⊘ Skipping meme coin news: {feed['title'][:80]}...")
+                save_processed_hash(feed_id_str)
+                processed_hashes.add(feed_id_str)
+                max_processed_id_int = max(max_processed_id_int, feed['id'])
+                continue
+            
+            # Фильтр шума: проверяем первое предложение контента
+            first_sentence = feed['content'].split('.')[0] if feed['content'] else ''
+            noise_keywords = [
+                'Whale Trader', 'whale trader',
+                'A whale', 'a whale', 
+                'On-chain whale', 'on-chain whale',
+                'Ultimate Shorter', 'ultimate shorter',
+                'Antminer', 'antminer',
+                '「',  # Специальный символ
+            ]
+            # Также проверяем просто "Whale" если это первое слово
+            first_word = first_sentence.strip().split()[0] if first_sentence.strip() else ''
+            is_whale_start = first_word.lower() == 'whale'
+            
+            is_noise = any(kw in first_sentence for kw in noise_keywords) or is_whale_start
+            
+            if is_noise:
+                logger.info(f"⊘ Skipping noise (whale/antminer): {feed['title'][:60]}...")
                 save_processed_hash(feed_id_str)
                 processed_hashes.add(feed_id_str)
                 max_processed_id_int = max(max_processed_id_int, feed['id'])
