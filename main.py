@@ -493,21 +493,34 @@ def main():
                 max_processed_id_int = max(max_processed_id_int, feed['id'])
                 continue
             
-            # Фильтр шума: проверяем первое предложение контента
+            # Фильтр шума: проверяем И title И первое предложение content
+            title_text = feed['title'] if feed['title'] else ''
             first_sentence = feed['content'].split('.')[0] if feed['content'] else ''
-            noise_keywords = [
-                'Whale Trader', 'whale trader',
-                'A whale', 'a whale', 
-                'On-chain whale', 'on-chain whale',
-                'Ultimate Shorter', 'ultimate shorter',
-                'Antminer', 'antminer',
-                '「',  # Специальный символ
-            ]
-            # Также проверяем просто "Whale" если это первое слово
-            first_word = first_sentence.strip().split()[0] if first_sentence.strip() else ''
-            is_whale_start = first_word.lower() == 'whale'
+            combined_text = title_text + ' ' + first_sentence
+            combined_lower = combined_text.lower()
             
-            is_noise = any(kw in first_sentence for kw in noise_keywords) or is_whale_start
+            noise_keywords = [
+                'whale trader',
+                'a whale',
+                'the whale',       # Добавлено!
+                'on-chain whale',
+                'ultimate shorter',
+                'antminer',
+                '「',              # Специальный символ
+            ]
+            
+            # Проверяем ключевые слова (case-insensitive)
+            has_noise_keyword = any(kw in combined_lower for kw in noise_keywords)
+            
+            # Также проверяем символ 「 отдельно (он не в lower)
+            has_special_char = '「' in combined_text
+            
+            # Проверяем "whale" как отдельное слово в начале предложения
+            words = combined_text.strip().split()
+            first_word = words[0].lower() if words else ''
+            is_whale_start = first_word == 'whale'
+            
+            is_noise = has_noise_keyword or has_special_char or is_whale_start
             
             if is_noise:
                 logger.info(f"⊘ Skipping noise (whale/antminer): {feed['title'][:60]}...")
